@@ -73,6 +73,7 @@ def main(arguments):
         e = f"Zabbix returned the following error: {str(e)}."
         logger.error(e)
     # Get all Zabbix and Netbox data
+    netbox_sites = netbox.dcim.sites
     netbox_devices = netbox.dcim.devices.filter(**nb_device_filter)
     netbox_journals = netbox.extras.journal_entries
     zabbix_groups = zabbix.hostgroup.get(output=['groupid', 'name'])
@@ -81,7 +82,7 @@ def main(arguments):
     # Go through all Netbox devices
     for nb_device in netbox_devices:
         try:
-            device = NetworkDevice(nb_device, zabbix, netbox_journals,
+            device = NetworkDevice(nb_device, netbox_sites, zabbix, netbox_journals,
                                    arguments.journal)
             device.set_hostgroup(arguments.layout)
             device.set_template(templates_config_context)
@@ -178,9 +179,11 @@ class NetworkDevice():
     INPUT: (Netbox device class, ZabbixAPI class, journal flag, NB journal class)
     """
 
-    def __init__(self, nb, zabbix, nb_journal_class, journal=None):
+    def __init__(self, nb, sites, zabbix, nb_journal_class, journal=None):
         self.nb = nb
         self.id = nb.id
+        self.longitude = sites.get(name=nb.site).longitude
+        self.latitude = sites.get(name=nb.site).latitude
         self.name = nb.name
         self.status = nb.status.label
         self.zabbix = zabbix
@@ -434,6 +437,19 @@ class NetworkDevice():
             logger.warning(e)
             raise SyncInventoryError(e)
 
+    def setPSK(self):
+        if("zabbix" in self.nb.config_context):
+            if ("tls_accept" in self.nb.config_context['zabbix'] and
+                    "tls_connect" in self.nb.config_context['zabbix'] and
+                    "tls_psk" in self.nb.config_context['zabbix'] and
+                    "tls_psk_identity" in self.nb.config_context['zabbix']):
+                self.tls_accept = self.nb.config_context['zabbix']['tls_accept']
+                self.tls_connect = self.nb.config_context['zabbix']['tls_connect']
+                self.tls_psk = self.nb.config_context['zabbix']['tls_psk']
+                self.tls_psk_identity = self.nb.config_context['zabbix']['tls_psk_identity']
+                return True
+            return False
+
     def setProxy(self, proxy_list):
         # check if Zabbix Proxy has been defined in config context
         if("zabbix" in self.nb.config_context):
@@ -465,11 +481,28 @@ class NetworkDevice():
             # Set interface, group and template configuration
             interfaces = self.setInterfaceDetails()
             groups = [{"groupid": self.group_id}]
+            # Inventory
+            inventory = {"location_lon": self.longitude, "location_lat": self.latitude}
             # Set Zabbix proxy if defined
             self.setProxy(proxys)
+            # Set PSK
+            psk_available = self.setPSK()
             # Add host to Zabbix
             try:
-                host = self.zabbix.host.create(host=self.name,
+                if psk_available:
+                    host = self.zabbix.host.create(host=self.name,
+                                               tls_accept=self.tls_accept,
+                                               tls_connect=self.tls_connect,
+                                               tls_psk_identity=self.tls_psk_identity,
+                                               tls_psk=self.tls_psk,
+                                               status=self.zabbix_state,
+                                               interfaces=interfaces,
+                                               groups=groups,
+                                               templates=self.zbx_templates,
+                                               proxy_hostid=self.zbxproxy,
+                                               description=description)
+                else:
+                    host = self.zabbix.host.create(host=self.name,
                                                status=self.zabbix_state,
                                                interfaces=interfaces,
                                                groups=groups,
